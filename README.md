@@ -6,6 +6,7 @@ into terminal HTTP workflows.
 ```bash
 cookiex import github.com --profile work
 cookiex show work
+cookiex diff work
 cookiex play https://github.com/settings --profile work
 cookiex send GET https://github.com/settings --profile work
 cookiex export work --format curl
@@ -29,9 +30,10 @@ headers, TLS fingerprints, IP binding, or device attestation.
 - curl, Python requests, JavaScript fetch, axios, HTTPie, and curl_cffi export
 - Profile default headers (encrypted with cookies)
 - Multiple Cookiex profiles
+- Snapshot vs Chrome profile diff
 
-Cookie editing, TUI, profile diff, expiry notifications, Firefox, macOS, and
-Windows are not implemented yet.
+Cookie editing, expiry notifications, Firefox, macOS, and Windows are not
+implemented yet.
 
 ## Build
 
@@ -119,6 +121,13 @@ cookiex export work --format python --url https://app.example.com/api/me
 cookiex export work --format javascript
 ```
 
+Compare a snapshot to the current Chrome cookies before refreshing:
+
+```bash
+cookiex diff work
+cookiex diff work --values
+```
+
 Refresh an existing snapshot:
 
 ```bash
@@ -128,7 +137,8 @@ cookiex sync work
 ## Storage and safety
 
 - Imports are limited to a target host; there is no implicit all-sites export.
-- Cookie values are not shown by `import` or `profiles`.
+- Cookie values are not shown by `import`, `profiles`, or `diff` unless
+  `--values` is set.
 - Profile files are encrypted with AES-256-GCM and written with mode `0600`.
 - The random vault key is stored in Linux Secret Service.
 - Chrome's cookie database is copied to a private temporary directory and is

@@ -164,6 +164,95 @@ func TestImportRefusesOverwriteWithoutForce(t *testing.T) {
 	}
 }
 
+func TestDiffComparesSnapshotToChromeWithoutLeakingValues(t *testing.T) {
+	oldExpiry := time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC)
+	newExpiry := time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC)
+	store := &memoryProfiles{profiles: map[string]vault.Profile{
+		"work": {
+			Name: "work", Host: "example.com", Browser: "Chrome", BrowserProfile: "Default",
+			BrowserProfilePath: "/config/google-chrome/Default",
+			Cookies: []cookiemodel.Cookie{
+				{Name: "session", Value: "old-secret", Domain: ".example.com", Path: "/", Expires: &oldExpiry},
+				{Name: "old_token", Value: "gone-secret", Domain: ".example.com", Path: "/"},
+			},
+		},
+	}}
+	services := Services{
+		ConfigHome: "/config",
+		Profiles:   store,
+		DiscoverProfiles: func(string) ([]chrome.Profile, error) {
+			return []chrome.Profile{{
+				Browser: "Chrome", Application: "chrome", Name: "Default",
+				Path: "/config/google-chrome/Default", CookiesPath: "/cookies",
+			}}, nil
+		},
+		ReadCookies: func(_ context.Context, _ chrome.Profile, _ string) ([]cookiemodel.Cookie, error) {
+			return []cookiemodel.Cookie{
+				{Name: "session", Value: "new-secret", Domain: ".example.com", Path: "/", Expires: &newExpiry},
+				{Name: "session2", Value: "fresh-secret", Domain: ".example.com", Path: "/"},
+			}, nil
+		},
+	}
+
+	output := execute(t, services, "diff", "work")
+	for _, secret := range []string{"old-secret", "new-secret", "gone-secret", "fresh-secret"} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("diff leaked %q:\n%s", secret, output)
+		}
+	}
+	for _, want := range []string{
+		"Diff work (example.com)",
+		"+ session2",
+		"- old_token",
+		"~ session",
+		"value changed",
+		"expires 2026-08-01 → 2026-09-01",
+		"3 differences",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("diff missing %q:\n%s", want, output)
+		}
+	}
+
+	revealed := execute(t, services, "diff", "work", "--values")
+	if !strings.Contains(revealed, "value old-secret → new-secret") {
+		t.Fatalf("diff --values missing secrets:\n%s", revealed)
+	}
+	if store.profiles["work"].Cookies[0].Value != "old-secret" {
+		t.Fatal("diff mutated the stored profile")
+	}
+}
+
+func TestDiffReportsNoDifferences(t *testing.T) {
+	cookie := cookiemodel.Cookie{
+		Name: "session", Value: "tok", Domain: "example.com", Path: "/", HostOnly: true,
+	}
+	store := &memoryProfiles{profiles: map[string]vault.Profile{
+		"work": {
+			Name: "work", Host: "example.com",
+			BrowserProfilePath: "/config/google-chrome/Default",
+			Cookies:            []cookiemodel.Cookie{cookie},
+		},
+	}}
+	services := Services{
+		ConfigHome: "/config",
+		Profiles:   store,
+		DiscoverProfiles: func(string) ([]chrome.Profile, error) {
+			return []chrome.Profile{{
+				Browser: "Chrome", Name: "Default", Path: "/config/google-chrome/Default",
+			}}, nil
+		},
+		ReadCookies: func(_ context.Context, _ chrome.Profile, _ string) ([]cookiemodel.Cookie, error) {
+			return []cookiemodel.Cookie{cookie}, nil
+		},
+	}
+
+	output := execute(t, services, "diff", "work")
+	if !strings.Contains(output, "No differences.") {
+		t.Fatalf("diff output = %q", output)
+	}
+}
+
 func TestShowListsCookiesWithoutValues(t *testing.T) {
 	expires := time.Date(2027, time.January, 1, 0, 0, 0, 0, time.UTC)
 	store := &memoryProfiles{profiles: map[string]vault.Profile{

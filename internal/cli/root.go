@@ -15,6 +15,7 @@ import (
 
 	"cookiex/internal/chrome"
 	cookiemodel "cookiex/internal/cookie"
+	cookiediff "cookiex/internal/diff"
 	exporter "cookiex/internal/export"
 	hdrs "cookiex/internal/headers"
 	requestmodel "cookiex/internal/request"
@@ -87,6 +88,7 @@ func NewRootCommand(services Services) *cobra.Command {
 		newImportCommand(services),
 		newProfilesCommand(services),
 		newShowCommand(services),
+		newDiffCommand(services),
 		newUICommand(services),
 		newPlayCommand(services),
 		newExportCommand(services),
@@ -247,6 +249,34 @@ func newShowCommand(services Services) *cobra.Command {
 		},
 	}
 	command.Flags().BoolVar(&showValues, "values", false, "include live cookie values")
+	return command
+}
+
+func newDiffCommand(services Services) *cobra.Command {
+	var showValues bool
+	command := &cobra.Command{
+		Use:   "diff <profile>",
+		Short: "Compare a cookie snapshot to the current Chrome cookies",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(command *cobra.Command, args []string) error {
+			profile, err := services.Profiles.Load(args[0])
+			if err != nil {
+				return err
+			}
+			browserProfile, err := resolveBrowserProfile(services, profile)
+			if err != nil {
+				return err
+			}
+			live, err := services.ReadCookies(command.Context(), browserProfile, profile.Host)
+			if err != nil {
+				return err
+			}
+			result := cookiediff.Compare(profile.Cookies, live)
+			fmt.Fprint(command.OutOrStdout(), cookiediff.Format(profile.Name, profile.Host, result, showValues))
+			return nil
+		},
+	}
+	command.Flags().BoolVar(&showValues, "values", false, "include live cookie values in changes")
 	return command
 }
 
@@ -419,21 +449,11 @@ func newSyncCommand(services Services) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			profiles, err := services.DiscoverProfiles(services.ConfigHome)
+			browserProfile, err := resolveBrowserProfile(services, profile)
 			if err != nil {
 				return err
 			}
-			var browserProfile *chrome.Profile
-			for index := range profiles {
-				if profiles[index].Path == profile.BrowserProfilePath {
-					browserProfile = &profiles[index]
-					break
-				}
-			}
-			if browserProfile == nil {
-				return fmt.Errorf("original Chrome profile %q is no longer available", profile.BrowserProfilePath)
-			}
-			cookies, err := services.ReadCookies(command.Context(), *browserProfile, profile.Host)
+			cookies, err := services.ReadCookies(command.Context(), browserProfile, profile.Host)
 			if err != nil {
 				return err
 			}
@@ -447,6 +467,19 @@ func newSyncCommand(services Services) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func resolveBrowserProfile(services Services, profile vault.Profile) (chrome.Profile, error) {
+	profiles, err := services.DiscoverProfiles(services.ConfigHome)
+	if err != nil {
+		return chrome.Profile{}, err
+	}
+	for _, candidate := range profiles {
+		if candidate.Path == profile.BrowserProfilePath {
+			return candidate, nil
+		}
+	}
+	return chrome.Profile{}, fmt.Errorf("original Chrome profile %q is no longer available", profile.BrowserProfilePath)
 }
 
 func chooseProfile(command *cobra.Command, services Services, explicit string) (chrome.Profile, error) {
