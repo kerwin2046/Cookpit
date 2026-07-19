@@ -12,6 +12,7 @@ cookiex send GET https://github.com/settings --profile work
 cookiex export work --format curl
 cookiex sync work
 cookiex profiles
+cookiex ui
 ```
 
 Cookiex only reads cookies already stored by your local browser. It does not
@@ -35,13 +36,19 @@ headers, TLS fingerprints, IP binding, or device attestation.
 Cookie editing, expiry notifications, Firefox, macOS, and Windows are not
 implemented yet.
 
-## Build
+## Install
 
-The project uses Go's toolchain management and currently targets Go 1.25.
+Requires Go 1.25+ (the module uses Go toolchain management).
 
 ```bash
 go build -o ./bin/cookiex ./cmd/cookiex
 ./bin/cookiex --help
+```
+
+Or install into your `GOBIN`:
+
+```bash
+go install ./cmd/cookiex
 ```
 
 ## Usage
@@ -58,43 +65,6 @@ Existing profiles are protected. Overwrite only with:
 cookiex import app.example.com --profile work --force
 ```
 
-Inspect a snapshot without printing secrets:
-
-```bash
-cookiex show work
-cookiex show work --values
-```
-
-Play an authenticated request and inspect the response plus client snippets:
-
-```bash
-cookiex play https://app.example.com/api/me --profile work
-cookiex play https://app.example.com/api/items \
-  --profile work \
-  -X POST \
-  -H 'Content-Type=application/json' \
-  -H 'x-vis-domain=www.compamed-tradefair.com' \
-  -d '{"name":"demo"}' \
-  --snippet none
-```
-
-Open the fullscreen playground:
-
-```bash
-cookiex ui
-cookiex ui 'https://www.compamed-tradefair.com/vis-api/vis/v1/en/directory/a' --profile work
-```
-
-In the TUI:
-
-- `←/→` change profile or method
-- `a` / `e` / `d` add, edit, delete headers
-- `p` mark a header as profile default `[P]`
-- `Ctrl+Enter` send
-- `Ctrl+S` save enabled `[P]` headers into the encrypted profile
-- `1/2/3` switch Response / Request / Code
-- `[` / `]` cycle code formats
-
 When more than one Chrome profile exists, Cookiex asks once and remembers the
 selected browser profile. Override it when needed:
 
@@ -104,21 +74,12 @@ cookiex import app.example.com \
   --chrome-profile "Chrome:Profile 2"
 ```
 
-Send a request:
+Inspect a snapshot without printing secrets:
 
 ```bash
-cookiex send POST https://app.example.com/api/items \
-  --profile work \
-  -H 'Content-Type=application/json' \
-  -d '{"name":"demo"}'
-```
-
-Export runnable code:
-
-```bash
-cookiex export work --format curl
-cookiex export work --format python --url https://app.example.com/api/me
-cookiex export work --format javascript
+cookiex show work
+cookiex show work --values
+cookiex profiles
 ```
 
 Compare a snapshot to the current Chrome cookies before refreshing:
@@ -134,8 +95,67 @@ Refresh an existing snapshot:
 cookiex sync work
 ```
 
+Send a request:
+
+```bash
+cookiex send POST https://app.example.com/api/items \
+  --profile work \
+  -H 'Content-Type=application/json' \
+  -d '{"name":"demo"}'
+```
+
+Play an authenticated request and inspect the response plus client snippets:
+
+```bash
+cookiex play https://app.example.com/api/me --profile work
+cookiex play https://app.example.com/api/items \
+  --profile work \
+  -X POST \
+  -H 'Content-Type=application/json' \
+  -d '{"name":"demo"}' \
+  --snippet all
+```
+
+`--snippet` accepts `curl` (default), `all`, `none`, or a comma list such as
+`python,axios`.
+
+Open the fullscreen playground:
+
+```bash
+cookiex ui
+cookiex ui 'https://app.example.com/api/me' --profile work
+```
+
+In the TUI:
+
+- `Tab` / `Shift+Tab` move focus
+- `←/→` change profile, method, or result tabs
+- `Space` enable/disable a header
+- `a` / `e` / `d` add, edit, delete headers
+- `p` mark a header as profile default `[P]`
+- `Ctrl+Enter` send
+- `Ctrl+S` save enabled `[P]` headers into the encrypted profile
+- `1/2/3` switch Response / Request / Code
+- `[` / `]` cycle code formats
+- `q` quit
+
+Export runnable code:
+
+```bash
+cookiex export work --format curl
+cookiex export work --format python --url https://app.example.com/api/me
+cookiex export work --format javascript
+cookiex export work --format curl_cffi
+```
+
+Supported formats: `curl`, `python`, `javascript`, `axios`, `httpie`,
+`curl_cffi`.
+
 ## Storage and safety
 
+- Profiles live under `$XDG_DATA_HOME/cookiex/profiles`
+  (default `~/.local/share/cookiex/profiles`).
+- Chrome profile selection is remembered in `$XDG_CONFIG_HOME/cookiex/selection.json`.
 - Imports are limited to a target host; there is no implicit all-sites export.
 - Cookie values are not shown by `import`, `profiles`, or `diff` unless
   `--values` is set.
@@ -160,3 +180,7 @@ go test -race ./...
 ```
 
 The validated design and implementation plan are in `docs/plans/`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
