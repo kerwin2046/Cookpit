@@ -44,5 +44,5 @@
 1. Test request-spec building and tab cycling without a real terminal.
 2. Implement Bubble Tea app: profile, method, URL, headers, body, send, tabs.
 3. Add `cookiex ui [url] --profile`.
-4. `Ctrl+Enter` send, `Ctrl+S` save profile headers, `q` quit, mouse enabled.
+4. `Enter` send (Body keeps Enter for newlines), `Ctrl+S` save profile headers, `q` quit, mouse enabled.
 5. Run full `go test ./...` and build binary.

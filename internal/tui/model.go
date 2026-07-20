@@ -187,7 +187,7 @@ func New(opts Options) (*Model, error) {
 		hdrName:      hdrName,
 		hdrValue:     hdrValue,
 		focus:        focusURL,
-		status:       "Ctrl+Enter send · Ctrl+S save headers · Tab next · q quit",
+		status:       "Enter send · Ctrl+S save headers · Tab next · q quit",
 	}
 	m.urlInput.Focus()
 	m.refreshViewport()
@@ -230,8 +230,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateHeaderEditor(msg)
 		}
 		if m.focus == focusURL {
-			if msg.String() == "tab" || msg.String() == "shift+tab" || msg.String() == "ctrl+enter" ||
-				msg.String() == "ctrl+s" || msg.String() == "q" || msg.Type == tea.KeyCtrlC {
+			if msg.String() == "tab" || msg.String() == "shift+tab" || msg.String() == "enter" ||
+				msg.String() == "ctrl+enter" || msg.String() == "ctrl+j" || msg.String() == "ctrl+s" ||
+				msg.String() == "q" || msg.Type == tea.KeyCtrlC {
 				// fall through to global keys after blur handling below
 			} else {
 				var cmd tea.Cmd
@@ -241,7 +242,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.focus == focusBody {
 			switch msg.String() {
-			case "tab", "shift+tab", "ctrl+enter", "ctrl+s", "q":
+			case "tab", "shift+tab", "ctrl+enter", "ctrl+j", "ctrl+s", "q":
 			default:
 				if msg.Type != tea.KeyCtrlC {
 					var cmd tea.Cmd
@@ -252,7 +253,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.focus == focusResult {
 			switch msg.String() {
-			case "tab", "shift+tab", "ctrl+enter", "ctrl+s", "q", "1", "2", "3", "[", "]":
+			case "tab", "shift+tab", "enter", "ctrl+enter", "ctrl+j", "ctrl+s", "q", "1", "2", "3", "[", "]":
 			default:
 				if msg.Type != tea.KeyCtrlC {
 					var cmd tea.Cmd
@@ -278,7 +279,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "shift+tab":
 			m.cycleFocus(-1)
 			return m, nil
-		case "ctrl+enter", "ctrl+j":
+		case "enter", "ctrl+enter", "ctrl+j":
 			return m, m.send()
 		case "ctrl+s":
 			return m, m.saveHeaders()
@@ -365,7 +366,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.startAddHeader()
 				return m, nil
 			}
-		case "e", "enter":
+		case "e":
 			if m.focus == focusHeaders && len(m.headers) > 0 {
 				m.startEditHeader(m.headerIdx)
 				return m, nil
@@ -488,7 +489,7 @@ func (m *Model) View() string {
 		status = statusStyle.Render("Sending…")
 	}
 
-	help := helpStyle.Render("Tab focus · ←/→ profile/method/tabs · Space enable header · a add · e edit · p mark [P] · d delete · Ctrl+Enter send · Ctrl+S save · q quit")
+	help := helpStyle.Render("Tab focus · ←/→ profile/method/tabs · Space enable header · a add · e edit · p mark [P] · d delete · Enter send · Ctrl+S save · q quit")
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		title,

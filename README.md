@@ -133,7 +133,7 @@ In the TUI:
 - `Space` enable/disable a header
 - `a` / `e` / `d` add, edit, delete headers
 - `p` mark a header as profile default `[P]`
-- `Ctrl+Enter` send
+- `Enter` send (in Body, Enter inserts a newline; Tab away then Enter to send)
 - `Ctrl+S` save enabled `[P]` headers into the encrypted profile
 - `1/2/3` switch Response / Request / Code
 - `[` / `]` cycle code formats
