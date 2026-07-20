@@ -134,7 +134,15 @@ In the TUI:
 - `a` / `e` / `d` add, edit, delete headers
 - `p` mark a header as profile default `[P]`
 - `Enter` send (in Body, Enter inserts a newline; Tab away then Enter to send)
+- `Ctrl+R` refresh profile cookies from Chrome
+- `Ctrl+H` cycle request history
+- `Ctrl+P` save current form as a named preset
+- `Ctrl+O` cycle named presets
 - `Ctrl+S` save enabled `[P]` headers into the encrypted profile
+- When a URL has a host and no `x-vis-domain` header exists, the TUI adds
+  `x-vis-domain: {{host}}` automatically (disable with Space or delete with `d`)
+- Header values may use `{{host}}`, `{{origin}}`, and `{{scheme}}` placeholders;
+  they expand when sending or exporting
 - `1/2/3` switch Response / Request / Code
 - `[` / `]` cycle code formats
 - `q` quit
@@ -155,6 +163,9 @@ Supported formats: `curl`, `python`, `javascript`, `axios`, `httpie`,
 
 - Profiles live under `$XDG_DATA_HOME/cookiex/profiles`
   (default `~/.local/share/cookiex/profiles`).
+- Playground history and presets live in
+  `$XDG_DATA_HOME/cookiex/playground.json` (mode `0600`; Cookie headers are
+  never written).
 - Chrome profile selection is remembered in `$XDG_CONFIG_HOME/cookiex/selection.json`.
 - Imports are limited to a target host; there is no implicit all-sites export.
 - Cookie values are not shown by `import`, `profiles`, or `diff` unless

@@ -12,6 +12,7 @@ import (
 
 	cookiemodel "cookiex/internal/cookie"
 	exporter "cookiex/internal/export"
+	"cookiex/internal/history"
 	requestmodel "cookiex/internal/request"
 	"cookiex/internal/vault"
 
@@ -51,9 +52,25 @@ type RequestRunner interface {
 	Send(context.Context, requestmodel.Spec, []cookiemodel.Cookie) (requestmodel.Response, error)
 }
 
+// ProfileSyncer refreshes a profile's cookies from the original Chrome profile.
+type ProfileSyncer interface {
+	Sync(ctx context.Context, profile vault.Profile) (vault.Profile, error)
+}
+
+// HistoryStore persists playground request history and named presets.
+type HistoryStore interface {
+	AppendHistory(entry history.Entry) error
+	ListHistory() []history.Entry
+	SavePreset(name string, entry history.Entry) error
+	ListPresets() []history.Entry
+	LoadPreset(name string) (history.Entry, error)
+}
+
 type Options struct {
 	Profiles    ProfileStore
 	Runner      RequestRunner
+	Syncer      ProfileSyncer
+	History     HistoryStore
 	ProfileName string
 	URL         string
 	Method      string
@@ -62,6 +79,8 @@ type Options struct {
 type Model struct {
 	profiles ProfileStore
 	runner   RequestRunner
+	syncer   ProfileSyncer
+	history  HistoryStore
 
 	profileNames []string
 	profileIdx   int
@@ -82,6 +101,11 @@ type Model struct {
 	hdrValue     textinput.Model
 	hdrFocusVal  bool
 
+	savingPreset bool
+	presetName   textinput.Model
+	historyIdx   int
+	presetIdx    int
+
 	focus      focusArea
 	resultTab  resultTab
 	codeFormat int
@@ -90,6 +114,7 @@ type Model struct {
 	height int
 
 	sending bool
+	syncing bool
 	status  string
 	err     string
 
@@ -102,6 +127,12 @@ type sendDoneMsg struct {
 	spec requestmodel.Spec
 	resp requestmodel.Response
 	err  error
+}
+
+type syncDoneMsg struct {
+	profile vault.Profile
+	oldCount int
+	err      error
 }
 
 func New(opts Options) (*Model, error) {
@@ -159,6 +190,11 @@ func New(opts Options) (*Model, error) {
 	hdrValue.CharLimit = 2048
 	hdrValue.Width = 40
 
+	presetName := textinput.New()
+	presetName.Placeholder = "preset-name"
+	presetName.CharLimit = 64
+	presetName.Width = 32
+
 	methods := []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 	methodIdx := 0
 	method := strings.ToUpper(strings.TrimSpace(opts.Method))
@@ -175,6 +211,8 @@ func New(opts Options) (*Model, error) {
 	m := &Model{
 		profiles:     opts.Profiles,
 		runner:       opts.Runner,
+		syncer:       opts.Syncer,
+		history:      opts.History,
 		profileNames: names,
 		profileIdx:   profileIdx,
 		profile:      profile,
@@ -183,11 +221,14 @@ func New(opts Options) (*Model, error) {
 		urlInput:     urlInput,
 		body:         body,
 		viewport:     viewport.New(80, 12),
-		headers:      HeadersFromProfile(profile),
+		headers:      EnsureHostDerivedHeaders(urlInput.Value(), HeadersFromProfile(profile)),
 		hdrName:      hdrName,
 		hdrValue:     hdrValue,
+		presetName:   presetName,
+		historyIdx:   -1,
+		presetIdx:    -1,
 		focus:        focusURL,
-		status:       "Enter send · Ctrl+S save headers · Tab next · q quit",
+		status:       "Enter send · Ctrl+R sync · Ctrl+H history · Ctrl+P/O presets · Ctrl+S save · q quit",
 	}
 	m.urlInput.Focus()
 	m.refreshViewport()
@@ -219,20 +260,44 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastSpec = msg.spec
 			resp := msg.resp
 			m.lastResp = &resp
-			m.status = fmt.Sprintf("%s · %s", resp.Status, resp.Duration.Round(time.Millisecond))
+			matched := 0
+			if parsed, err := requestmodel.ParseURL(msg.spec.URL); err == nil {
+				matched = len(requestmodel.MatchedCookieNames(parsed, m.profile.Cookies, time.Now()))
+			}
+			m.status = fmt.Sprintf("%s · %s · %d cookies", resp.Status, resp.Duration.Round(time.Millisecond), matched)
 			m.resultTab = tabResponse
+			m.recordHistory(msg.spec)
 		}
 		m.refreshViewport()
 		return m, nil
 
+	case syncDoneMsg:
+		m.syncing = false
+		if msg.err != nil {
+			m.err = msg.err.Error()
+			m.status = "sync failed"
+		} else {
+			m.err = ""
+			m.profile = msg.profile
+			m.headers = HeadersFromProfile(msg.profile)
+			m.headerIdx = 0
+			m.status = fmt.Sprintf("synced %d → %d cookies", msg.oldCount, len(msg.profile.Cookies))
+			m.refreshViewport()
+		}
+		return m, nil
+
 	case tea.KeyMsg:
+		if m.savingPreset {
+			return m.updatePresetName(msg)
+		}
 		if m.editingHdr {
 			return m.updateHeaderEditor(msg)
 		}
 		if m.focus == focusURL {
 			if msg.String() == "tab" || msg.String() == "shift+tab" || msg.String() == "enter" ||
 				msg.String() == "ctrl+enter" || msg.String() == "ctrl+j" || msg.String() == "ctrl+s" ||
-				msg.String() == "q" || msg.Type == tea.KeyCtrlC {
+				msg.String() == "ctrl+r" || msg.String() == "ctrl+h" || msg.String() == "ctrl+p" ||
+				msg.String() == "ctrl+o" || msg.String() == "q" || msg.Type == tea.KeyCtrlC {
 				// fall through to global keys after blur handling below
 			} else {
 				var cmd tea.Cmd
@@ -242,7 +307,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.focus == focusBody {
 			switch msg.String() {
-			case "tab", "shift+tab", "ctrl+enter", "ctrl+j", "ctrl+s", "q":
+			case "tab", "shift+tab", "ctrl+enter", "ctrl+j", "ctrl+s", "ctrl+r", "ctrl+h", "ctrl+p", "ctrl+o", "q":
 			default:
 				if msg.Type != tea.KeyCtrlC {
 					var cmd tea.Cmd
@@ -253,7 +318,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.focus == focusResult {
 			switch msg.String() {
-			case "tab", "shift+tab", "enter", "ctrl+enter", "ctrl+j", "ctrl+s", "q", "1", "2", "3", "[", "]":
+			case "tab", "shift+tab", "enter", "ctrl+enter", "ctrl+j", "ctrl+s", "ctrl+r", "ctrl+h", "ctrl+p", "ctrl+o", "q", "1", "2", "3", "[", "]":
 			default:
 				if msg.Type != tea.KeyCtrlC {
 					var cmd tea.Cmd
@@ -281,6 +346,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "enter", "ctrl+enter", "ctrl+j":
 			return m, m.send()
+		case "ctrl+r":
+			return m, m.syncProfile()
+		case "ctrl+h":
+			m.cycleHistory(1)
+			return m, nil
+		case "ctrl+p":
+			m.startSavePreset()
+			return m, nil
+		case "ctrl+o":
+			m.cyclePreset(1)
+			return m, nil
 		case "ctrl+s":
 			return m, m.saveHeaders()
 		case "left", "h":
@@ -454,6 +530,128 @@ func (m *Model) startEditHeader(idx int) {
 	m.hdrValue.Blur()
 }
 
+func (m *Model) startSavePreset() {
+	if m.history == nil {
+		m.err = "history is not available"
+		return
+	}
+	m.savingPreset = true
+	m.presetName.SetValue("")
+	m.presetName.Focus()
+	m.urlInput.Blur()
+	m.body.Blur()
+}
+
+func (m *Model) updatePresetName(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.savingPreset = false
+		m.presetName.Blur()
+		return m, nil
+	case "enter":
+		name := strings.TrimSpace(m.presetName.Value())
+		m.savingPreset = false
+		m.presetName.Blur()
+		if name == "" {
+			m.err = "preset name is required"
+			return m, nil
+		}
+		entry := HistoryEntryFromForm(m.profile.Name, m.methods[m.methodIdx], m.urlInput.Value(), m.body.Value(), m.headers)
+		if err := m.history.SavePreset(name, entry); err != nil {
+			m.err = err.Error()
+			m.status = "preset save failed"
+			return m, nil
+		}
+		m.err = ""
+		m.status = fmt.Sprintf("saved preset %s", name)
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.presetName, cmd = m.presetName.Update(msg)
+	return m, cmd
+}
+
+func (m *Model) recordHistory(spec requestmodel.Spec) {
+	if m.history == nil {
+		return
+	}
+	entry := HistoryEntryFromForm(m.profile.Name, spec.Method, spec.URL, spec.Body, m.headers)
+	if err := m.history.AppendHistory(entry); err != nil {
+		m.err = err.Error()
+	}
+}
+
+func (m *Model) cycleHistory(delta int) {
+	if m.history == nil {
+		m.err = "history is not available"
+		return
+	}
+	items := m.history.ListHistory()
+	if len(items) == 0 {
+		m.status = "no history yet"
+		return
+	}
+	if m.historyIdx < 0 {
+		m.historyIdx = 0
+	} else {
+		m.historyIdx = (m.historyIdx + delta + len(items)) % len(items)
+	}
+	m.applyEntry(items[m.historyIdx])
+	m.status = fmt.Sprintf("history %d/%d", m.historyIdx+1, len(items))
+	m.err = ""
+}
+
+func (m *Model) cyclePreset(delta int) {
+	if m.history == nil {
+		m.err = "history is not available"
+		return
+	}
+	items := m.history.ListPresets()
+	if len(items) == 0 {
+		m.status = "no presets yet"
+		return
+	}
+	if m.presetIdx < 0 {
+		m.presetIdx = 0
+	} else {
+		m.presetIdx = (m.presetIdx + delta + len(items)) % len(items)
+	}
+	m.applyEntry(items[m.presetIdx])
+	m.status = fmt.Sprintf("preset %s (%d/%d)", items[m.presetIdx].Name, m.presetIdx+1, len(items))
+	m.err = ""
+}
+
+func (m *Model) applyEntry(entry history.Entry) {
+	if entry.Profile != "" {
+		for i, name := range m.profileNames {
+			if name == entry.Profile {
+				if i != m.profileIdx {
+					m.profileIdx = i
+					if profile, err := m.profiles.Load(name); err == nil {
+						m.profile = profile
+					}
+				}
+				break
+			}
+		}
+	}
+	method := strings.ToUpper(strings.TrimSpace(entry.Method))
+	for i, candidate := range m.methods {
+		if candidate == method {
+			m.methodIdx = i
+			break
+		}
+	}
+	m.urlInput.SetValue(entry.URL)
+	m.body.SetValue(entry.Body)
+	if len(entry.Headers) > 0 {
+		m.headers = EnsureHostDerivedHeaders(entry.URL, ApplyHistoryHeaders(entry.Headers))
+	} else {
+		m.headers = EnsureHostDerivedHeaders(entry.URL, HeadersFromProfile(m.profile))
+	}
+	m.headerIdx = 0
+}
+
 func (m *Model) View() string {
 	title := titleStyle.Render("Cookiex Playground")
 	profile := fmt.Sprintf("Profile: %s", m.profileNames[m.profileIdx])
@@ -488,8 +686,29 @@ func (m *Model) View() string {
 	if m.sending {
 		status = statusStyle.Render("Sending…")
 	}
+	if m.syncing {
+		status = statusStyle.Render("Syncing…")
+	}
 
-	help := helpStyle.Render("Tab focus · ←/→ profile/method/tabs · Space enable header · a add · e edit · p mark [P] · d delete · Enter send · Ctrl+S save · q quit")
+	help := helpStyle.Render("Tab · ←/→ · Space · a/e/p/d headers · Enter send · Ctrl+R sync · Ctrl+H history · Ctrl+P save preset · Ctrl+O open preset · Ctrl+S save · q quit")
+
+	if m.savingPreset {
+		help = helpStyle.Render("Preset name · Enter save · Esc cancel")
+		return lipgloss.JoinVertical(lipgloss.Left,
+			title,
+			lipgloss.JoinHorizontal(lipgloss.Top, profile, "   ", method),
+			urlLabel,
+			m.urlInput.View(),
+			headerBox,
+			bodyLabel,
+			m.body.View(),
+			focusedStyle.Render("Save preset: ")+m.presetName.View(),
+			tabs,
+			result,
+			status,
+			help,
+		)
+	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		title,
@@ -622,12 +841,22 @@ func (m *Model) requestContent() string {
 		}
 		fmt.Fprintf(&b, "%s: %s\n", name, value)
 	}
-	fmt.Fprintf(&b, "Cookie: [redacted — %d cookies from profile]\n", len(m.profile.Cookies))
+	b.WriteString(m.matchedCookiesLine(spec.URL))
+	b.WriteByte('\n')
 	if spec.Body != "" {
 		b.WriteString("\n")
 		b.WriteString(spec.Body)
 	}
 	return b.String()
+}
+
+func (m *Model) matchedCookiesLine(rawURL string) string {
+	parsed, err := requestmodel.ParseURL(rawURL)
+	if err != nil {
+		return requestmodel.FormatMatchedCookiesLine(nil)
+	}
+	names := requestmodel.MatchedCookieNames(parsed, m.profile.Cookies, time.Now())
+	return requestmodel.FormatMatchedCookiesLine(names)
 }
 
 func (m *Model) codeContent() string {
@@ -663,6 +892,9 @@ func (m *Model) cycleFocus(delta int) {
 			break
 		}
 	}
+	if m.focus == focusURL {
+		m.headers = EnsureHostDerivedHeaders(m.urlInput.Value(), m.headers)
+	}
 	idx = (idx + delta + len(areas)) % len(areas)
 	m.focus = areas[idx]
 	m.urlInput.Blur()
@@ -687,16 +919,17 @@ func (m *Model) changeProfile(delta int) {
 		return
 	}
 	m.profile = profile
-	m.headers = HeadersFromProfile(profile)
+	m.headers = EnsureHostDerivedHeaders(m.urlInput.Value(), HeadersFromProfile(profile))
 	m.headerIdx = 0
 	m.err = ""
 	m.status = fmt.Sprintf("loaded profile %s", profile.Name)
 }
 
 func (m *Model) send() tea.Cmd {
-	if m.sending {
+	if m.sending || m.syncing {
 		return nil
 	}
+	m.headers = EnsureHostDerivedHeaders(m.urlInput.Value(), m.headers)
 	spec := BuildSpec(m.methods[m.methodIdx], m.urlInput.Value(), m.body.Value(), m.headers)
 	if spec.URL == "" {
 		m.err = "URL is required"
@@ -713,6 +946,26 @@ func (m *Model) send() tea.Cmd {
 		resp, err := runner.Send(ctx, spec, cookies)
 		cancel()
 		return sendDoneMsg{spec: spec, resp: resp, err: err}
+	}
+}
+
+func (m *Model) syncProfile() tea.Cmd {
+	if m.syncing || m.sending {
+		return nil
+	}
+	if m.syncer == nil {
+		m.err = "sync is not available"
+		return nil
+	}
+	m.syncing = true
+	m.err = ""
+	m.status = "Syncing…"
+	syncer := m.syncer
+	profile := m.profile
+	oldCount := len(profile.Cookies)
+	return func() tea.Msg {
+		updated, err := syncer.Sync(context.Background(), profile)
+		return syncDoneMsg{profile: updated, oldCount: oldCount, err: err}
 	}
 }
 

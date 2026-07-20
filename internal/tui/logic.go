@@ -2,8 +2,10 @@ package tui
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 
+	"cookiex/internal/history"
 	hdrs "cookiex/internal/headers"
 	requestmodel "cookiex/internal/request"
 	"cookiex/internal/vault"
@@ -29,10 +31,11 @@ func BuildSpec(method, url, body string, rows []HeaderRow) requestmodel.Spec {
 			requestHeaders[row.Name] = row.Value
 		}
 	}
+	merged := hdrs.Merge(profileHeaders, requestHeaders)
 	return requestmodel.Spec{
 		Method:  orDefault(method, http.MethodGet),
 		URL:     strings.TrimSpace(url),
-		Headers: hdrs.Merge(profileHeaders, requestHeaders),
+		Headers: hdrs.Expand(merged, url),
 		Body:    body,
 	}
 }
@@ -60,6 +63,57 @@ func ProfileHeadersFromRows(rows []HeaderRow) map[string]string {
 		out[row.Name] = row.Value
 	}
 	return out
+}
+
+func HistoryEntryFromForm(profile, method, url, body string, rows []HeaderRow) history.Entry {
+	headers := make(map[string]string)
+	for _, row := range rows {
+		if !row.Enabled || strings.TrimSpace(row.Name) == "" {
+			continue
+		}
+		headers[row.Name] = row.Value
+	}
+	return history.Entry{
+		Profile: profile,
+		Method:  orDefault(method, http.MethodGet),
+		URL:     strings.TrimSpace(url),
+		Headers: headers,
+		Body:    body,
+	}
+}
+
+func ApplyHistoryHeaders(headers map[string]string) []HeaderRow {
+	names := hdrs.SortedNames(headers)
+	rows := make([]HeaderRow, 0, len(names))
+	for _, name := range names {
+		rows = append(rows, HeaderRow{
+			Name:        name,
+			Value:       headers[name],
+			Enabled:     true,
+			FromProfile: false,
+		})
+	}
+	return rows
+}
+
+// EnsureHostDerivedHeaders adds x-vis-domain={{host}} when the URL has a host
+// and no x-vis-domain header is present yet.
+func EnsureHostDerivedHeaders(rawURL string, rows []HeaderRow) []HeaderRow {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Hostname() == "" {
+		return rows
+	}
+	for _, row := range rows {
+		if strings.EqualFold(strings.TrimSpace(row.Name), "x-vis-domain") {
+			return rows
+		}
+	}
+	return append(append([]HeaderRow(nil), rows...), HeaderRow{
+		Name:        "x-vis-domain",
+		Value:       "{{host}}",
+		Enabled:     true,
+		FromProfile: false,
+	})
 }
 
 func orDefault(value, fallback string) string {

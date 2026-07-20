@@ -17,6 +17,7 @@ import (
 	cookiemodel "cookiex/internal/cookie"
 	cookiediff "cookiex/internal/diff"
 	exporter "cookiex/internal/export"
+	"cookiex/internal/history"
 	hdrs "cookiex/internal/headers"
 	requestmodel "cookiex/internal/request"
 	"cookiex/internal/tui"
@@ -294,6 +295,8 @@ func newUICommand(services Services) *cobra.Command {
 			return tui.Run(tui.Options{
 				Profiles:    services.Profiles,
 				Runner:      services.Runner,
+				Syncer:      profileSyncer{services: services},
+				History:     openPlaygroundHistory(services),
 				ProfileName: profileName,
 				URL:         url,
 				Method:      method,
@@ -303,6 +306,26 @@ func newUICommand(services Services) *cobra.Command {
 	command.Flags().StringVarP(&profileName, "profile", "p", "", "Cookiex profile name")
 	command.Flags().StringVarP(&method, "method", "X", http.MethodGet, "initial HTTP method")
 	return command
+}
+
+type profileSyncer struct {
+	services Services
+}
+
+func (s profileSyncer) Sync(ctx context.Context, profile vault.Profile) (vault.Profile, error) {
+	return SyncProfile(ctx, s.services, profile)
+}
+
+func openPlaygroundHistory(services Services) *history.Store {
+	data, err := dataHome()
+	if err != nil {
+		return nil
+	}
+	store, err := history.Open(filepath.Join(data, "cookiex", "playground.json"))
+	if err != nil {
+		return nil
+	}
+	return store
 }
 
 func newPlayCommand(services Services) *cobra.Command {
@@ -327,7 +350,7 @@ func newPlayCommand(services Services) *cobra.Command {
 			spec := requestmodel.Spec{
 				Method:  method,
 				URL:     args[0],
-				Headers: hdrs.Merge(profile.Headers, headers),
+				Headers: hdrs.Expand(hdrs.Merge(profile.Headers, headers), args[0]),
 				Body:    body,
 			}
 			response, err := services.Runner.Send(command.Context(), spec, profile.Cookies)
@@ -390,7 +413,7 @@ func newExportCommand(services Services) *cobra.Command {
 			}
 			output, err := exporter.Render(
 				exporter.Format(strings.ToLower(format)),
-				requestmodel.Spec{Method: method, URL: target, Headers: hdrs.Merge(profile.Headers, headers), Body: body},
+				requestmodel.Spec{Method: method, URL: target, Headers: hdrs.Expand(hdrs.Merge(profile.Headers, headers), target), Body: body},
 				profile.Cookies,
 			)
 			if err != nil {
@@ -424,7 +447,7 @@ func newSendCommand(services Services) *cobra.Command {
 				return err
 			}
 			response, err := services.Runner.Send(command.Context(), requestmodel.Spec{
-				Method: args[0], URL: args[1], Headers: hdrs.Merge(profile.Headers, headers), Body: body,
+				Method: args[0], URL: args[1], Headers: hdrs.Expand(hdrs.Merge(profile.Headers, headers), args[1]), Body: body,
 			}, profile.Cookies)
 			if err != nil {
 				return err
@@ -449,24 +472,33 @@ func newSyncCommand(services Services) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			browserProfile, err := resolveBrowserProfile(services, profile)
-			if err != nil {
-				return err
-			}
-			cookies, err := services.ReadCookies(command.Context(), browserProfile, profile.Host)
-			if err != nil {
-				return err
-			}
 			oldCount := len(profile.Cookies)
-			profile.Cookies = cookies
-			profile.SyncedAt = now(services)
-			if err := services.Profiles.Save(profile); err != nil {
+			updated, err := SyncProfile(command.Context(), services, profile)
+			if err != nil {
 				return err
 			}
-			fmt.Fprintf(command.OutOrStdout(), "Synced %s: %d → %d cookies\n", profile.Name, oldCount, len(cookies))
+			fmt.Fprintf(command.OutOrStdout(), "Synced %s: %d → %d cookies\n", updated.Name, oldCount, len(updated.Cookies))
 			return nil
 		},
 	}
+}
+
+// SyncProfile reloads cookies for profile from its original Chrome profile path.
+func SyncProfile(ctx context.Context, services Services, profile vault.Profile) (vault.Profile, error) {
+	browserProfile, err := resolveBrowserProfile(services, profile)
+	if err != nil {
+		return vault.Profile{}, err
+	}
+	cookies, err := services.ReadCookies(ctx, browserProfile, profile.Host)
+	if err != nil {
+		return vault.Profile{}, err
+	}
+	profile.Cookies = cookies
+	profile.SyncedAt = now(services)
+	if err := services.Profiles.Save(profile); err != nil {
+		return vault.Profile{}, err
+	}
+	return profile, nil
 }
 
 func resolveBrowserProfile(services Services, profile vault.Profile) (chrome.Profile, error) {
