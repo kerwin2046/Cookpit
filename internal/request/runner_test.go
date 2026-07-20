@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	cookiemodel "cookiex/internal/cookie"
 )
@@ -70,5 +71,41 @@ func TestRunnerBoundsResponseBody(t *testing.T) {
 func TestRunnerRejectsInvalidRequest(t *testing.T) {
 	if _, err := (Runner{}).Send(context.Background(), Spec{Method: "BAD METHOD", URL: "://bad"}, nil); err == nil {
 		t.Fatal("Send accepted an invalid request")
+	}
+}
+
+func TestMatchedCookieNames(t *testing.T) {
+	target, err := url.Parse("https://www.example.com/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 20, 0, 0, 0, 0, time.UTC)
+	expired := now.Add(-time.Hour)
+	cookies := []cookiemodel.Cookie{
+		{Name: "session", Domain: ".example.com", Path: "/", Value: "secret"},
+		{Name: "other", Domain: ".other.com", Path: "/", Value: "x"},
+		{Name: "expired", Domain: ".example.com", Path: "/", Value: "x", Expires: &expired},
+		{Name: "alpha", Domain: "www.example.com", Path: "/", Value: "a", HostOnly: true},
+	}
+	names := MatchedCookieNames(target, cookies, now)
+	if len(names) != 2 || names[0] != "alpha" || names[1] != "session" {
+		t.Fatalf("names = %#v", names)
+	}
+}
+
+func TestFormatMatchedCookiesLine(t *testing.T) {
+	if got := FormatMatchedCookiesLine(nil); got != "Cookie: [redacted — 0 matched]" {
+		t.Fatalf("empty = %q", got)
+	}
+	if got := FormatMatchedCookiesLine([]string{"a", "b"}); got != "Cookie: [redacted — 2 matched: a, b]" {
+		t.Fatalf("two = %q", got)
+	}
+	many := make([]string, 13)
+	for i := range many {
+		many[i] = string(rune('a' + i))
+	}
+	got := FormatMatchedCookiesLine(many)
+	if !strings.Contains(got, "13 matched:") || !strings.Contains(got, "…") {
+		t.Fatalf("truncated = %q", got)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -112,4 +113,31 @@ func MatchingCookies(target *url.URL, cookies []cookiemodel.Cookie, now time.Tim
 		}
 	}
 	return matched
+}
+
+// MatchedCookieNames returns sorted cookie names that would be sent to target.
+// Values are never included.
+func MatchedCookieNames(target *url.URL, cookies []cookiemodel.Cookie, now time.Time) []string {
+	matched := MatchingCookies(target, cookies, now)
+	names := make([]string, len(matched))
+	for i, item := range matched {
+		names[i] = item.Name
+	}
+	sort.Strings(names)
+	return names
+}
+
+// FormatMatchedCookiesLine builds a redacted Request-tab summary line.
+func FormatMatchedCookiesLine(names []string) string {
+	if len(names) == 0 {
+		return "Cookie: [redacted — 0 matched]"
+	}
+	const maxNames = 12
+	shown := names
+	suffix := ""
+	if len(names) > maxNames {
+		shown = names[:maxNames]
+		suffix = ", …"
+	}
+	return fmt.Sprintf("Cookie: [redacted — %d matched: %s%s]", len(names), strings.Join(shown, ", "), suffix)
 }
