@@ -139,6 +139,10 @@ In the TUI:
 - `Ctrl+P` save current form as a named preset
 - `Ctrl+O` cycle named presets
 - `Ctrl+S` save enabled `[P]` headers into the encrypted profile
+- When a URL has a host and no `x-vis-domain` header exists, the TUI adds
+  `x-vis-domain: {{host}}` automatically (disable with Space or delete with `d`)
+- Header values may use `{{host}}`, `{{origin}}`, and `{{scheme}}` placeholders;
+  they expand when sending or exporting
 - `1/2/3` switch Response / Request / Code
 - `[` / `]` cycle code formats
 - `q` quit

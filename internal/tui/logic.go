@@ -2,6 +2,7 @@ package tui
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 
 	"cookiex/internal/history"
@@ -30,10 +31,11 @@ func BuildSpec(method, url, body string, rows []HeaderRow) requestmodel.Spec {
 			requestHeaders[row.Name] = row.Value
 		}
 	}
+	merged := hdrs.Merge(profileHeaders, requestHeaders)
 	return requestmodel.Spec{
 		Method:  orDefault(method, http.MethodGet),
 		URL:     strings.TrimSpace(url),
-		Headers: hdrs.Merge(profileHeaders, requestHeaders),
+		Headers: hdrs.Expand(merged, url),
 		Body:    body,
 	}
 }
@@ -92,6 +94,26 @@ func ApplyHistoryHeaders(headers map[string]string) []HeaderRow {
 		})
 	}
 	return rows
+}
+
+// EnsureHostDerivedHeaders adds x-vis-domain={{host}} when the URL has a host
+// and no x-vis-domain header is present yet.
+func EnsureHostDerivedHeaders(rawURL string, rows []HeaderRow) []HeaderRow {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Hostname() == "" {
+		return rows
+	}
+	for _, row := range rows {
+		if strings.EqualFold(strings.TrimSpace(row.Name), "x-vis-domain") {
+			return rows
+		}
+	}
+	return append(append([]HeaderRow(nil), rows...), HeaderRow{
+		Name:        "x-vis-domain",
+		Value:       "{{host}}",
+		Enabled:     true,
+		FromProfile: false,
+	})
 }
 
 func orDefault(value, fallback string) string {

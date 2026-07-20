@@ -76,3 +76,27 @@ func TestHistoryEntryFromForm(t *testing.T) {
 		t.Fatalf("disabled header included: %#v", entry.Headers)
 	}
 }
+
+func TestEnsureHostDerivedHeaders(t *testing.T) {
+	rows := EnsureHostDerivedHeaders("https://www.compamed-tradefair.com/vis-api/x", nil)
+	if len(rows) != 1 || rows[0].Name != "x-vis-domain" || rows[0].Value != "{{host}}" || !rows[0].Enabled {
+		t.Fatalf("rows = %#v", rows)
+	}
+	same := EnsureHostDerivedHeaders("https://www.compamed-tradefair.com/vis-api/x", rows)
+	if len(same) != 1 {
+		t.Fatalf("duplicate added: %#v", same)
+	}
+	empty := EnsureHostDerivedHeaders("not-a-url", nil)
+	if len(empty) != 0 {
+		t.Fatalf("invalid url = %#v", empty)
+	}
+}
+
+func TestBuildSpecExpandsHostTemplate(t *testing.T) {
+	spec := BuildSpec("GET", "https://www.example.com/api", "", []HeaderRow{
+		{Name: "x-vis-domain", Value: "{{host}}", Enabled: true, FromProfile: true},
+	})
+	if spec.Headers["x-vis-domain"] != "www.example.com" {
+		t.Fatalf("headers = %#v", spec.Headers)
+	}
+}

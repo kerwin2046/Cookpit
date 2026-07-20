@@ -350,7 +350,7 @@ func newPlayCommand(services Services) *cobra.Command {
 			spec := requestmodel.Spec{
 				Method:  method,
 				URL:     args[0],
-				Headers: hdrs.Merge(profile.Headers, headers),
+				Headers: hdrs.Expand(hdrs.Merge(profile.Headers, headers), args[0]),
 				Body:    body,
 			}
 			response, err := services.Runner.Send(command.Context(), spec, profile.Cookies)
@@ -413,7 +413,7 @@ func newExportCommand(services Services) *cobra.Command {
 			}
 			output, err := exporter.Render(
 				exporter.Format(strings.ToLower(format)),
-				requestmodel.Spec{Method: method, URL: target, Headers: hdrs.Merge(profile.Headers, headers), Body: body},
+				requestmodel.Spec{Method: method, URL: target, Headers: hdrs.Expand(hdrs.Merge(profile.Headers, headers), target), Body: body},
 				profile.Cookies,
 			)
 			if err != nil {
@@ -447,7 +447,7 @@ func newSendCommand(services Services) *cobra.Command {
 				return err
 			}
 			response, err := services.Runner.Send(command.Context(), requestmodel.Spec{
-				Method: args[0], URL: args[1], Headers: hdrs.Merge(profile.Headers, headers), Body: body,
+				Method: args[0], URL: args[1], Headers: hdrs.Expand(hdrs.Merge(profile.Headers, headers), args[1]), Body: body,
 			}, profile.Cookies)
 			if err != nil {
 				return err

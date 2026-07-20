@@ -199,7 +199,19 @@ func TestCycleHistoryAppliesEntry(t *testing.T) {
 	if model.urlInput.Value() != "https://example.com/items" || model.methods[model.methodIdx] != "POST" {
 		t.Fatalf("form = url %q method %s", model.urlInput.Value(), model.methods[model.methodIdx])
 	}
-	if len(model.headers) != 1 || model.headers[0].Name != "Accept" {
+	if len(model.headers) != 2 {
+		t.Fatalf("headers = %#v", model.headers)
+	}
+	foundAccept, foundDomain := false, false
+	for _, row := range model.headers {
+		if row.Name == "Accept" && row.Value == "json" {
+			foundAccept = true
+		}
+		if row.Name == "x-vis-domain" && row.Value == "{{host}}" {
+			foundDomain = true
+		}
+	}
+	if !foundAccept || !foundDomain {
 		t.Fatalf("headers = %#v", model.headers)
 	}
 }

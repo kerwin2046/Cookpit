@@ -221,7 +221,7 @@ func New(opts Options) (*Model, error) {
 		urlInput:     urlInput,
 		body:         body,
 		viewport:     viewport.New(80, 12),
-		headers:      HeadersFromProfile(profile),
+		headers:      EnsureHostDerivedHeaders(urlInput.Value(), HeadersFromProfile(profile)),
 		hdrName:      hdrName,
 		hdrValue:     hdrValue,
 		presetName:   presetName,
@@ -645,9 +645,9 @@ func (m *Model) applyEntry(entry history.Entry) {
 	m.urlInput.SetValue(entry.URL)
 	m.body.SetValue(entry.Body)
 	if len(entry.Headers) > 0 {
-		m.headers = ApplyHistoryHeaders(entry.Headers)
+		m.headers = EnsureHostDerivedHeaders(entry.URL, ApplyHistoryHeaders(entry.Headers))
 	} else {
-		m.headers = HeadersFromProfile(m.profile)
+		m.headers = EnsureHostDerivedHeaders(entry.URL, HeadersFromProfile(m.profile))
 	}
 	m.headerIdx = 0
 }
@@ -892,6 +892,9 @@ func (m *Model) cycleFocus(delta int) {
 			break
 		}
 	}
+	if m.focus == focusURL {
+		m.headers = EnsureHostDerivedHeaders(m.urlInput.Value(), m.headers)
+	}
 	idx = (idx + delta + len(areas)) % len(areas)
 	m.focus = areas[idx]
 	m.urlInput.Blur()
@@ -916,7 +919,7 @@ func (m *Model) changeProfile(delta int) {
 		return
 	}
 	m.profile = profile
-	m.headers = HeadersFromProfile(profile)
+	m.headers = EnsureHostDerivedHeaders(m.urlInput.Value(), HeadersFromProfile(profile))
 	m.headerIdx = 0
 	m.err = ""
 	m.status = fmt.Sprintf("loaded profile %s", profile.Name)
@@ -926,6 +929,7 @@ func (m *Model) send() tea.Cmd {
 	if m.sending || m.syncing {
 		return nil
 	}
+	m.headers = EnsureHostDerivedHeaders(m.urlInput.Value(), m.headers)
 	spec := BuildSpec(m.methods[m.methodIdx], m.urlInput.Value(), m.body.Value(), m.headers)
 	if spec.URL == "" {
 		m.err = "URL is required"
