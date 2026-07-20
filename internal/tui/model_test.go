@@ -75,3 +75,71 @@ func TestNewRequiresProfiles(t *testing.T) {
 		t.Fatal("expected error when no profiles exist")
 	}
 }
+
+type fakeSyncer struct {
+	profile vault.Profile
+	err     error
+}
+
+func (f fakeSyncer) Sync(context.Context, vault.Profile) (vault.Profile, error) {
+	return f.profile, f.err
+}
+
+func TestSyncDoneUpdatesCookies(t *testing.T) {
+	store := &memoryProfiles{profiles: map[string]vault.Profile{
+		"work": {
+			Name: "work", Host: "example.com",
+			Cookies: []cookiemodel.Cookie{{Name: "old", Value: "1", Domain: "example.com", Path: "/", HostOnly: true}},
+		},
+	}}
+	model, err := New(Options{
+		Profiles:    store,
+		Runner:      fakeRunner{},
+		Syncer:      fakeSyncer{},
+		ProfileName: "work",
+		URL:         "https://example.com/",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	updated, cmd := model.Update(syncDoneMsg{
+		oldCount: 1,
+		profile: vault.Profile{
+			Name: "work", Host: "example.com",
+			Cookies: []cookiemodel.Cookie{
+				{Name: "fresh", Value: "2", Domain: "example.com", Path: "/", HostOnly: true},
+				{Name: "extra", Value: "3", Domain: "example.com", Path: "/", HostOnly: true},
+			},
+		},
+	})
+	if cmd != nil {
+		t.Fatal("expected nil cmd")
+	}
+	m := updated.(*Model)
+	if len(m.profile.Cookies) != 2 || m.profile.Cookies[0].Name != "fresh" {
+		t.Fatalf("cookies = %#v", m.profile.Cookies)
+	}
+	if m.status != "synced 1 → 2 cookies" {
+		t.Fatalf("status = %q", m.status)
+	}
+}
+
+func TestMatchedCookiesLineUsesURL(t *testing.T) {
+	store := &memoryProfiles{profiles: map[string]vault.Profile{
+		"work": {
+			Name: "work", Host: "example.com",
+			Cookies: []cookiemodel.Cookie{
+				{Name: "session", Value: "1", Domain: "example.com", Path: "/", HostOnly: true},
+				{Name: "other", Value: "1", Domain: "other.com", Path: "/"},
+			},
+		},
+	}}
+	model, err := New(Options{Profiles: store, Runner: fakeRunner{}, ProfileName: "work", URL: "https://example.com/a"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	line := model.matchedCookiesLine("https://example.com/a")
+	if line != "Cookie: [redacted — 1 matched: session]" {
+		t.Fatalf("line = %q", line)
+	}
+}

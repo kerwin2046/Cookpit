@@ -51,9 +51,15 @@ type RequestRunner interface {
 	Send(context.Context, requestmodel.Spec, []cookiemodel.Cookie) (requestmodel.Response, error)
 }
 
+// ProfileSyncer refreshes a profile's cookies from the original Chrome profile.
+type ProfileSyncer interface {
+	Sync(ctx context.Context, profile vault.Profile) (vault.Profile, error)
+}
+
 type Options struct {
 	Profiles    ProfileStore
 	Runner      RequestRunner
+	Syncer      ProfileSyncer
 	ProfileName string
 	URL         string
 	Method      string
@@ -62,6 +68,7 @@ type Options struct {
 type Model struct {
 	profiles ProfileStore
 	runner   RequestRunner
+	syncer   ProfileSyncer
 
 	profileNames []string
 	profileIdx   int
@@ -90,6 +97,7 @@ type Model struct {
 	height int
 
 	sending bool
+	syncing bool
 	status  string
 	err     string
 
@@ -102,6 +110,12 @@ type sendDoneMsg struct {
 	spec requestmodel.Spec
 	resp requestmodel.Response
 	err  error
+}
+
+type syncDoneMsg struct {
+	profile vault.Profile
+	oldCount int
+	err      error
 }
 
 func New(opts Options) (*Model, error) {
@@ -175,6 +189,7 @@ func New(opts Options) (*Model, error) {
 	m := &Model{
 		profiles:     opts.Profiles,
 		runner:       opts.Runner,
+		syncer:       opts.Syncer,
 		profileNames: names,
 		profileIdx:   profileIdx,
 		profile:      profile,
@@ -187,7 +202,7 @@ func New(opts Options) (*Model, error) {
 		hdrName:      hdrName,
 		hdrValue:     hdrValue,
 		focus:        focusURL,
-		status:       "Enter send · Ctrl+S save headers · Tab next · q quit",
+		status:       "Enter send · Ctrl+R sync · Ctrl+S save headers · Tab next · q quit",
 	}
 	m.urlInput.Focus()
 	m.refreshViewport()
@@ -219,10 +234,29 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastSpec = msg.spec
 			resp := msg.resp
 			m.lastResp = &resp
-			m.status = fmt.Sprintf("%s · %s", resp.Status, resp.Duration.Round(time.Millisecond))
+			matched := 0
+			if parsed, err := requestmodel.ParseURL(msg.spec.URL); err == nil {
+				matched = len(requestmodel.MatchedCookieNames(parsed, m.profile.Cookies, time.Now()))
+			}
+			m.status = fmt.Sprintf("%s · %s · %d cookies", resp.Status, resp.Duration.Round(time.Millisecond), matched)
 			m.resultTab = tabResponse
 		}
 		m.refreshViewport()
+		return m, nil
+
+	case syncDoneMsg:
+		m.syncing = false
+		if msg.err != nil {
+			m.err = msg.err.Error()
+			m.status = "sync failed"
+		} else {
+			m.err = ""
+			m.profile = msg.profile
+			m.headers = HeadersFromProfile(msg.profile)
+			m.headerIdx = 0
+			m.status = fmt.Sprintf("synced %d → %d cookies", msg.oldCount, len(msg.profile.Cookies))
+			m.refreshViewport()
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -232,7 +266,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.focus == focusURL {
 			if msg.String() == "tab" || msg.String() == "shift+tab" || msg.String() == "enter" ||
 				msg.String() == "ctrl+enter" || msg.String() == "ctrl+j" || msg.String() == "ctrl+s" ||
-				msg.String() == "q" || msg.Type == tea.KeyCtrlC {
+				msg.String() == "ctrl+r" || msg.String() == "q" || msg.Type == tea.KeyCtrlC {
 				// fall through to global keys after blur handling below
 			} else {
 				var cmd tea.Cmd
@@ -242,7 +276,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.focus == focusBody {
 			switch msg.String() {
-			case "tab", "shift+tab", "ctrl+enter", "ctrl+j", "ctrl+s", "q":
+			case "tab", "shift+tab", "ctrl+enter", "ctrl+j", "ctrl+s", "ctrl+r", "q":
 			default:
 				if msg.Type != tea.KeyCtrlC {
 					var cmd tea.Cmd
@@ -253,7 +287,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.focus == focusResult {
 			switch msg.String() {
-			case "tab", "shift+tab", "enter", "ctrl+enter", "ctrl+j", "ctrl+s", "q", "1", "2", "3", "[", "]":
+			case "tab", "shift+tab", "enter", "ctrl+enter", "ctrl+j", "ctrl+s", "ctrl+r", "q", "1", "2", "3", "[", "]":
 			default:
 				if msg.Type != tea.KeyCtrlC {
 					var cmd tea.Cmd
@@ -281,6 +315,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "enter", "ctrl+enter", "ctrl+j":
 			return m, m.send()
+		case "ctrl+r":
+			return m, m.syncProfile()
 		case "ctrl+s":
 			return m, m.saveHeaders()
 		case "left", "h":
@@ -488,8 +524,11 @@ func (m *Model) View() string {
 	if m.sending {
 		status = statusStyle.Render("Sending…")
 	}
+	if m.syncing {
+		status = statusStyle.Render("Syncing…")
+	}
 
-	help := helpStyle.Render("Tab focus · ←/→ profile/method/tabs · Space enable header · a add · e edit · p mark [P] · d delete · Enter send · Ctrl+S save · q quit")
+	help := helpStyle.Render("Tab focus · ←/→ profile/method/tabs · Space enable header · a add · e edit · p mark [P] · d delete · Enter send · Ctrl+R sync · Ctrl+S save · q quit")
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		title,
@@ -622,12 +661,22 @@ func (m *Model) requestContent() string {
 		}
 		fmt.Fprintf(&b, "%s: %s\n", name, value)
 	}
-	fmt.Fprintf(&b, "Cookie: [redacted — %d cookies from profile]\n", len(m.profile.Cookies))
+	b.WriteString(m.matchedCookiesLine(spec.URL))
+	b.WriteByte('\n')
 	if spec.Body != "" {
 		b.WriteString("\n")
 		b.WriteString(spec.Body)
 	}
 	return b.String()
+}
+
+func (m *Model) matchedCookiesLine(rawURL string) string {
+	parsed, err := requestmodel.ParseURL(rawURL)
+	if err != nil {
+		return requestmodel.FormatMatchedCookiesLine(nil)
+	}
+	names := requestmodel.MatchedCookieNames(parsed, m.profile.Cookies, time.Now())
+	return requestmodel.FormatMatchedCookiesLine(names)
 }
 
 func (m *Model) codeContent() string {
@@ -694,7 +743,7 @@ func (m *Model) changeProfile(delta int) {
 }
 
 func (m *Model) send() tea.Cmd {
-	if m.sending {
+	if m.sending || m.syncing {
 		return nil
 	}
 	spec := BuildSpec(m.methods[m.methodIdx], m.urlInput.Value(), m.body.Value(), m.headers)
@@ -713,6 +762,26 @@ func (m *Model) send() tea.Cmd {
 		resp, err := runner.Send(ctx, spec, cookies)
 		cancel()
 		return sendDoneMsg{spec: spec, resp: resp, err: err}
+	}
+}
+
+func (m *Model) syncProfile() tea.Cmd {
+	if m.syncing || m.sending {
+		return nil
+	}
+	if m.syncer == nil {
+		m.err = "sync is not available"
+		return nil
+	}
+	m.syncing = true
+	m.err = ""
+	m.status = "Syncing…"
+	syncer := m.syncer
+	profile := m.profile
+	oldCount := len(profile.Cookies)
+	return func() tea.Msg {
+		updated, err := syncer.Sync(context.Background(), profile)
+		return syncDoneMsg{profile: updated, oldCount: oldCount, err: err}
 	}
 }
 
