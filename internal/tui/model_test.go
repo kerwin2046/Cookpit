@@ -7,6 +7,7 @@ import (
 	"time"
 
 	cookiemodel "cookiex/internal/cookie"
+	historypkg "cookiex/internal/history"
 	requestmodel "cookiex/internal/request"
 	"cookiex/internal/vault"
 )
@@ -141,5 +142,64 @@ func TestMatchedCookiesLineUsesURL(t *testing.T) {
 	line := model.matchedCookiesLine("https://example.com/a")
 	if line != "Cookie: [redacted — 1 matched: session]" {
 		t.Fatalf("line = %q", line)
+	}
+}
+
+type memoryHistory struct {
+	history []historypkg.Entry
+	presets []historypkg.Entry
+}
+
+func (m *memoryHistory) AppendHistory(entry historypkg.Entry) error {
+	m.history = append([]historypkg.Entry{entry}, m.history...)
+	return nil
+}
+
+func (m *memoryHistory) ListHistory() []historypkg.Entry { return m.history }
+
+func (m *memoryHistory) SavePreset(name string, entry historypkg.Entry) error {
+	entry.Name = name
+	for i, existing := range m.presets {
+		if existing.Name == name {
+			m.presets[i] = entry
+			return nil
+		}
+	}
+	m.presets = append(m.presets, entry)
+	return nil
+}
+
+func (m *memoryHistory) ListPresets() []historypkg.Entry { return m.presets }
+
+func (m *memoryHistory) LoadPreset(name string) (historypkg.Entry, error) {
+	for _, entry := range m.presets {
+		if entry.Name == name {
+			return entry, nil
+		}
+	}
+	return historypkg.Entry{}, context.Canceled
+}
+
+func TestCycleHistoryAppliesEntry(t *testing.T) {
+	store := &memoryProfiles{profiles: map[string]vault.Profile{
+		"work": {Name: "work", Host: "example.com"},
+	}}
+	hist := &memoryHistory{history: []historypkg.Entry{{
+		Profile: "work", Method: "POST", URL: "https://example.com/items", Body: `{}`,
+		Headers: map[string]string{"Accept": "json"},
+	}}}
+	model, err := New(Options{
+		Profiles: store, Runner: fakeRunner{}, History: hist,
+		ProfileName: "work", URL: "https://example.com/",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	model.cycleHistory(1)
+	if model.urlInput.Value() != "https://example.com/items" || model.methods[model.methodIdx] != "POST" {
+		t.Fatalf("form = url %q method %s", model.urlInput.Value(), model.methods[model.methodIdx])
+	}
+	if len(model.headers) != 1 || model.headers[0].Name != "Accept" {
+		t.Fatalf("headers = %#v", model.headers)
 	}
 }

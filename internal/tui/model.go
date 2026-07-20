@@ -12,6 +12,7 @@ import (
 
 	cookiemodel "cookiex/internal/cookie"
 	exporter "cookiex/internal/export"
+	"cookiex/internal/history"
 	requestmodel "cookiex/internal/request"
 	"cookiex/internal/vault"
 
@@ -56,10 +57,20 @@ type ProfileSyncer interface {
 	Sync(ctx context.Context, profile vault.Profile) (vault.Profile, error)
 }
 
+// HistoryStore persists playground request history and named presets.
+type HistoryStore interface {
+	AppendHistory(entry history.Entry) error
+	ListHistory() []history.Entry
+	SavePreset(name string, entry history.Entry) error
+	ListPresets() []history.Entry
+	LoadPreset(name string) (history.Entry, error)
+}
+
 type Options struct {
 	Profiles    ProfileStore
 	Runner      RequestRunner
 	Syncer      ProfileSyncer
+	History     HistoryStore
 	ProfileName string
 	URL         string
 	Method      string
@@ -69,6 +80,7 @@ type Model struct {
 	profiles ProfileStore
 	runner   RequestRunner
 	syncer   ProfileSyncer
+	history  HistoryStore
 
 	profileNames []string
 	profileIdx   int
@@ -88,6 +100,11 @@ type Model struct {
 	hdrName      textinput.Model
 	hdrValue     textinput.Model
 	hdrFocusVal  bool
+
+	savingPreset bool
+	presetName   textinput.Model
+	historyIdx   int
+	presetIdx    int
 
 	focus      focusArea
 	resultTab  resultTab
@@ -173,6 +190,11 @@ func New(opts Options) (*Model, error) {
 	hdrValue.CharLimit = 2048
 	hdrValue.Width = 40
 
+	presetName := textinput.New()
+	presetName.Placeholder = "preset-name"
+	presetName.CharLimit = 64
+	presetName.Width = 32
+
 	methods := []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 	methodIdx := 0
 	method := strings.ToUpper(strings.TrimSpace(opts.Method))
@@ -190,6 +212,7 @@ func New(opts Options) (*Model, error) {
 		profiles:     opts.Profiles,
 		runner:       opts.Runner,
 		syncer:       opts.Syncer,
+		history:      opts.History,
 		profileNames: names,
 		profileIdx:   profileIdx,
 		profile:      profile,
@@ -201,8 +224,11 @@ func New(opts Options) (*Model, error) {
 		headers:      HeadersFromProfile(profile),
 		hdrName:      hdrName,
 		hdrValue:     hdrValue,
+		presetName:   presetName,
+		historyIdx:   -1,
+		presetIdx:    -1,
 		focus:        focusURL,
-		status:       "Enter send · Ctrl+R sync · Ctrl+S save headers · Tab next · q quit",
+		status:       "Enter send · Ctrl+R sync · Ctrl+H history · Ctrl+P/O presets · Ctrl+S save · q quit",
 	}
 	m.urlInput.Focus()
 	m.refreshViewport()
@@ -240,6 +266,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.status = fmt.Sprintf("%s · %s · %d cookies", resp.Status, resp.Duration.Round(time.Millisecond), matched)
 			m.resultTab = tabResponse
+			m.recordHistory(msg.spec)
 		}
 		m.refreshViewport()
 		return m, nil
@@ -260,13 +287,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.savingPreset {
+			return m.updatePresetName(msg)
+		}
 		if m.editingHdr {
 			return m.updateHeaderEditor(msg)
 		}
 		if m.focus == focusURL {
 			if msg.String() == "tab" || msg.String() == "shift+tab" || msg.String() == "enter" ||
 				msg.String() == "ctrl+enter" || msg.String() == "ctrl+j" || msg.String() == "ctrl+s" ||
-				msg.String() == "ctrl+r" || msg.String() == "q" || msg.Type == tea.KeyCtrlC {
+				msg.String() == "ctrl+r" || msg.String() == "ctrl+h" || msg.String() == "ctrl+p" ||
+				msg.String() == "ctrl+o" || msg.String() == "q" || msg.Type == tea.KeyCtrlC {
 				// fall through to global keys after blur handling below
 			} else {
 				var cmd tea.Cmd
@@ -276,7 +307,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.focus == focusBody {
 			switch msg.String() {
-			case "tab", "shift+tab", "ctrl+enter", "ctrl+j", "ctrl+s", "ctrl+r", "q":
+			case "tab", "shift+tab", "ctrl+enter", "ctrl+j", "ctrl+s", "ctrl+r", "ctrl+h", "ctrl+p", "ctrl+o", "q":
 			default:
 				if msg.Type != tea.KeyCtrlC {
 					var cmd tea.Cmd
@@ -287,7 +318,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.focus == focusResult {
 			switch msg.String() {
-			case "tab", "shift+tab", "enter", "ctrl+enter", "ctrl+j", "ctrl+s", "ctrl+r", "q", "1", "2", "3", "[", "]":
+			case "tab", "shift+tab", "enter", "ctrl+enter", "ctrl+j", "ctrl+s", "ctrl+r", "ctrl+h", "ctrl+p", "ctrl+o", "q", "1", "2", "3", "[", "]":
 			default:
 				if msg.Type != tea.KeyCtrlC {
 					var cmd tea.Cmd
@@ -317,6 +348,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.send()
 		case "ctrl+r":
 			return m, m.syncProfile()
+		case "ctrl+h":
+			m.cycleHistory(1)
+			return m, nil
+		case "ctrl+p":
+			m.startSavePreset()
+			return m, nil
+		case "ctrl+o":
+			m.cyclePreset(1)
+			return m, nil
 		case "ctrl+s":
 			return m, m.saveHeaders()
 		case "left", "h":
@@ -490,6 +530,128 @@ func (m *Model) startEditHeader(idx int) {
 	m.hdrValue.Blur()
 }
 
+func (m *Model) startSavePreset() {
+	if m.history == nil {
+		m.err = "history is not available"
+		return
+	}
+	m.savingPreset = true
+	m.presetName.SetValue("")
+	m.presetName.Focus()
+	m.urlInput.Blur()
+	m.body.Blur()
+}
+
+func (m *Model) updatePresetName(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.savingPreset = false
+		m.presetName.Blur()
+		return m, nil
+	case "enter":
+		name := strings.TrimSpace(m.presetName.Value())
+		m.savingPreset = false
+		m.presetName.Blur()
+		if name == "" {
+			m.err = "preset name is required"
+			return m, nil
+		}
+		entry := HistoryEntryFromForm(m.profile.Name, m.methods[m.methodIdx], m.urlInput.Value(), m.body.Value(), m.headers)
+		if err := m.history.SavePreset(name, entry); err != nil {
+			m.err = err.Error()
+			m.status = "preset save failed"
+			return m, nil
+		}
+		m.err = ""
+		m.status = fmt.Sprintf("saved preset %s", name)
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.presetName, cmd = m.presetName.Update(msg)
+	return m, cmd
+}
+
+func (m *Model) recordHistory(spec requestmodel.Spec) {
+	if m.history == nil {
+		return
+	}
+	entry := HistoryEntryFromForm(m.profile.Name, spec.Method, spec.URL, spec.Body, m.headers)
+	if err := m.history.AppendHistory(entry); err != nil {
+		m.err = err.Error()
+	}
+}
+
+func (m *Model) cycleHistory(delta int) {
+	if m.history == nil {
+		m.err = "history is not available"
+		return
+	}
+	items := m.history.ListHistory()
+	if len(items) == 0 {
+		m.status = "no history yet"
+		return
+	}
+	if m.historyIdx < 0 {
+		m.historyIdx = 0
+	} else {
+		m.historyIdx = (m.historyIdx + delta + len(items)) % len(items)
+	}
+	m.applyEntry(items[m.historyIdx])
+	m.status = fmt.Sprintf("history %d/%d", m.historyIdx+1, len(items))
+	m.err = ""
+}
+
+func (m *Model) cyclePreset(delta int) {
+	if m.history == nil {
+		m.err = "history is not available"
+		return
+	}
+	items := m.history.ListPresets()
+	if len(items) == 0 {
+		m.status = "no presets yet"
+		return
+	}
+	if m.presetIdx < 0 {
+		m.presetIdx = 0
+	} else {
+		m.presetIdx = (m.presetIdx + delta + len(items)) % len(items)
+	}
+	m.applyEntry(items[m.presetIdx])
+	m.status = fmt.Sprintf("preset %s (%d/%d)", items[m.presetIdx].Name, m.presetIdx+1, len(items))
+	m.err = ""
+}
+
+func (m *Model) applyEntry(entry history.Entry) {
+	if entry.Profile != "" {
+		for i, name := range m.profileNames {
+			if name == entry.Profile {
+				if i != m.profileIdx {
+					m.profileIdx = i
+					if profile, err := m.profiles.Load(name); err == nil {
+						m.profile = profile
+					}
+				}
+				break
+			}
+		}
+	}
+	method := strings.ToUpper(strings.TrimSpace(entry.Method))
+	for i, candidate := range m.methods {
+		if candidate == method {
+			m.methodIdx = i
+			break
+		}
+	}
+	m.urlInput.SetValue(entry.URL)
+	m.body.SetValue(entry.Body)
+	if len(entry.Headers) > 0 {
+		m.headers = ApplyHistoryHeaders(entry.Headers)
+	} else {
+		m.headers = HeadersFromProfile(m.profile)
+	}
+	m.headerIdx = 0
+}
+
 func (m *Model) View() string {
 	title := titleStyle.Render("Cookiex Playground")
 	profile := fmt.Sprintf("Profile: %s", m.profileNames[m.profileIdx])
@@ -528,7 +690,25 @@ func (m *Model) View() string {
 		status = statusStyle.Render("Syncing…")
 	}
 
-	help := helpStyle.Render("Tab focus · ←/→ profile/method/tabs · Space enable header · a add · e edit · p mark [P] · d delete · Enter send · Ctrl+R sync · Ctrl+S save · q quit")
+	help := helpStyle.Render("Tab · ←/→ · Space · a/e/p/d headers · Enter send · Ctrl+R sync · Ctrl+H history · Ctrl+P save preset · Ctrl+O open preset · Ctrl+S save · q quit")
+
+	if m.savingPreset {
+		help = helpStyle.Render("Preset name · Enter save · Esc cancel")
+		return lipgloss.JoinVertical(lipgloss.Left,
+			title,
+			lipgloss.JoinHorizontal(lipgloss.Top, profile, "   ", method),
+			urlLabel,
+			m.urlInput.View(),
+			headerBox,
+			bodyLabel,
+			m.body.View(),
+			focusedStyle.Render("Save preset: ")+m.presetName.View(),
+			tabs,
+			result,
+			status,
+			help,
+		)
+	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		title,

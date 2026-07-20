@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	"cookiex/internal/history"
 	hdrs "cookiex/internal/headers"
 	requestmodel "cookiex/internal/request"
 	"cookiex/internal/vault"
@@ -60,6 +61,37 @@ func ProfileHeadersFromRows(rows []HeaderRow) map[string]string {
 		out[row.Name] = row.Value
 	}
 	return out
+}
+
+func HistoryEntryFromForm(profile, method, url, body string, rows []HeaderRow) history.Entry {
+	headers := make(map[string]string)
+	for _, row := range rows {
+		if !row.Enabled || strings.TrimSpace(row.Name) == "" {
+			continue
+		}
+		headers[row.Name] = row.Value
+	}
+	return history.Entry{
+		Profile: profile,
+		Method:  orDefault(method, http.MethodGet),
+		URL:     strings.TrimSpace(url),
+		Headers: headers,
+		Body:    body,
+	}
+}
+
+func ApplyHistoryHeaders(headers map[string]string) []HeaderRow {
+	names := hdrs.SortedNames(headers)
+	rows := make([]HeaderRow, 0, len(names))
+	for _, name := range names {
+		rows = append(rows, HeaderRow{
+			Name:        name,
+			Value:       headers[name],
+			Enabled:     true,
+			FromProfile: false,
+		})
+	}
+	return rows
 }
 
 func orDefault(value, fallback string) string {

@@ -17,6 +17,7 @@ import (
 	cookiemodel "cookiex/internal/cookie"
 	cookiediff "cookiex/internal/diff"
 	exporter "cookiex/internal/export"
+	"cookiex/internal/history"
 	hdrs "cookiex/internal/headers"
 	requestmodel "cookiex/internal/request"
 	"cookiex/internal/tui"
@@ -295,6 +296,7 @@ func newUICommand(services Services) *cobra.Command {
 				Profiles:    services.Profiles,
 				Runner:      services.Runner,
 				Syncer:      profileSyncer{services: services},
+				History:     openPlaygroundHistory(services),
 				ProfileName: profileName,
 				URL:         url,
 				Method:      method,
@@ -312,6 +314,18 @@ type profileSyncer struct {
 
 func (s profileSyncer) Sync(ctx context.Context, profile vault.Profile) (vault.Profile, error) {
 	return SyncProfile(ctx, s.services, profile)
+}
+
+func openPlaygroundHistory(services Services) *history.Store {
+	data, err := dataHome()
+	if err != nil {
+		return nil
+	}
+	store, err := history.Open(filepath.Join(data, "cookiex", "playground.json"))
+	if err != nil {
+		return nil
+	}
+	return store
 }
 
 func newPlayCommand(services Services) *cobra.Command {

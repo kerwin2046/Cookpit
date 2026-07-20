@@ -45,3 +45,34 @@ func TestHeadersFromProfileAndSaveBack(t *testing.T) {
 		t.Fatalf("request-only header saved as profile: %#v", saved)
 	}
 }
+
+func TestApplyHistoryEntry(t *testing.T) {
+	rows := ApplyHistoryHeaders(map[string]string{
+		"Accept":       "application/json",
+		"x-vis-domain": "example.com",
+	})
+	if len(rows) != 2 {
+		t.Fatalf("rows = %#v", rows)
+	}
+	for _, row := range rows {
+		if row.FromProfile || !row.Enabled {
+			t.Fatalf("row = %#v", row)
+		}
+	}
+}
+
+func TestHistoryEntryFromForm(t *testing.T) {
+	entry := HistoryEntryFromForm("work", "POST", "https://example.com/a", `{"a":1}`, []HeaderRow{
+		{Name: "Accept", Value: "json", Enabled: true},
+		{Name: "X-Skip", Value: "no", Enabled: false},
+	})
+	if entry.Profile != "work" || entry.Method != "POST" || entry.URL != "https://example.com/a" || entry.Body != `{"a":1}` {
+		t.Fatalf("entry = %#v", entry)
+	}
+	if entry.Headers["Accept"] != "json" {
+		t.Fatalf("headers = %#v", entry.Headers)
+	}
+	if _, ok := entry.Headers["X-Skip"]; ok {
+		t.Fatalf("disabled header included: %#v", entry.Headers)
+	}
+}
