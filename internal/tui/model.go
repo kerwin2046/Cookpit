@@ -1,9 +1,7 @@
 package tui
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
@@ -71,6 +69,7 @@ type Options struct {
 	Runner      RequestRunner
 	Syncer      ProfileSyncer
 	History     HistoryStore
+	Clipboard   Clipboard
 	ProfileName string
 	URL         string
 	Method      string
@@ -81,6 +80,7 @@ type Model struct {
 	runner   RequestRunner
 	syncer   ProfileSyncer
 	history  HistoryStore
+	clipboard Clipboard
 
 	profileNames []string
 	profileIdx   int
@@ -106,9 +106,10 @@ type Model struct {
 	historyIdx   int
 	presetIdx    int
 
-	focus      focusArea
-	resultTab  resultTab
-	codeFormat int
+	focus        focusArea
+	resultTab    resultTab
+	responseView responseView
+	codeFormat   int
 
 	width  int
 	height int
@@ -213,6 +214,7 @@ func New(opts Options) (*Model, error) {
 		runner:       opts.Runner,
 		syncer:       opts.Syncer,
 		history:      opts.History,
+		clipboard:    opts.Clipboard,
 		profileNames: names,
 		profileIdx:   profileIdx,
 		profile:      profile,
@@ -228,7 +230,11 @@ func New(opts Options) (*Model, error) {
 		historyIdx:   -1,
 		presetIdx:    -1,
 		focus:        focusURL,
-		status:       "Enter send · Ctrl+R sync · Ctrl+H history · Ctrl+P/O presets · Ctrl+S save · q quit",
+		responseView: respViewBody,
+		status:       "Enter send · Ctrl+R sync · Ctrl+H history · ←/→ response h/b · y copy · q quit",
+	}
+	if m.clipboard == nil {
+		m.clipboard = defaultClipboard()
 	}
 	m.urlInput.Focus()
 	m.refreshViewport()
@@ -266,6 +272,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.status = fmt.Sprintf("%s · %s · %d cookies", resp.Status, resp.Duration.Round(time.Millisecond), matched)
 			m.resultTab = tabResponse
+			m.responseView = respViewBody
 			m.recordHistory(msg.spec)
 		}
 		m.refreshViewport()
@@ -318,7 +325,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.focus == focusResult {
 			switch msg.String() {
-			case "tab", "shift+tab", "enter", "ctrl+enter", "ctrl+j", "ctrl+s", "ctrl+r", "ctrl+h", "ctrl+p", "ctrl+o", "q", "1", "2", "3", "[", "]":
+			case "tab", "shift+tab", "enter", "ctrl+enter", "ctrl+j", "ctrl+s", "ctrl+r", "ctrl+h", "ctrl+p", "ctrl+o", "q", "1", "2", "3", "[", "]", "h", "b", "y":
 			default:
 				if msg.Type != tea.KeyCtrlC {
 					var cmd tea.Cmd
@@ -368,6 +375,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.methodIdx = (m.methodIdx - 1 + len(m.methods)) % len(m.methods)
 				return m, nil
 			}
+			if m.focus == focusResult && m.resultTab == tabResponse {
+				m.responseView = respViewHeaders
+				m.refreshViewport()
+				return m, nil
+			}
 			if m.focus == focusResult {
 				m.cycleTab(-1)
 				m.refreshViewport()
@@ -382,6 +394,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.methodIdx = (m.methodIdx + 1) % len(m.methods)
 				return m, nil
 			}
+			if m.focus == focusResult && m.resultTab == tabResponse {
+				m.responseView = respViewBody
+				m.refreshViewport()
+				return m, nil
+			}
 			if m.focus == focusResult {
 				m.cycleTab(1)
 				m.refreshViewport()
@@ -390,6 +407,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "1":
 			if m.focus == focusResult {
 				m.resultTab = tabResponse
+				m.responseView = respViewBody
 				m.refreshViewport()
 				return m, nil
 			}
@@ -405,6 +423,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.refreshViewport()
 				return m, nil
 			}
+		case "y":
+			m.copyCurrentView()
+			return m, nil
 		case "[":
 			if m.focus == focusResult && m.resultTab == tabCode {
 				m.codeFormat = (m.codeFormat - 1 + len(exporter.SupportedFormats)) % len(exporter.SupportedFormats)
@@ -690,7 +711,7 @@ func (m *Model) View() string {
 		status = statusStyle.Render("Syncing…")
 	}
 
-	help := helpStyle.Render("Tab · ←/→ · Space · a/e/p/d headers · Enter send · Ctrl+R sync · Ctrl+H history · Ctrl+P save preset · Ctrl+O open preset · Ctrl+S save · q quit")
+	help := helpStyle.Render("Tab · Enter send · Ctrl+R sync · Ctrl+H history · Ctrl+P/O presets · ←/→ response h/b · y copy · q quit")
 
 	if m.savingPreset {
 		help = helpStyle.Render("Preset name · Enter save · Esc cancel")
@@ -773,6 +794,21 @@ func (m *Model) renderTabs() string {
 		parts = append(parts, style.Render(fmt.Sprintf(" %s ", name)))
 	}
 	extra := ""
+	if m.resultTab == tabResponse {
+		parts := []string{"Headers", "Body"}
+		sub := make([]string, 0, 2)
+		for i, name := range parts {
+			style := tabStyle
+			if responseView(i) == m.responseView {
+				style = activeTabStyle
+			}
+			if m.focus == focusResult && responseView(i) == m.responseView {
+				style = focusedTabStyle
+			}
+			sub = append(sub, style.Render(" "+name+" "))
+		}
+		extra = "  " + lipgloss.JoinHorizontal(lipgloss.Top, sub...) + blurredStyle.Render("  ←/→ or h/l")
+	}
 	if m.resultTab == tabCode {
 		extra = "  " + blurredStyle.Render(fmt.Sprintf("[%s]  [/] cycle format", exporter.FormatLabel(exporter.SupportedFormats[m.codeFormat])))
 	}
@@ -799,31 +835,10 @@ func (m *Model) responseContent() string {
 	if m.lastResp == nil {
 		return "Send a request to see the response."
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s  %s\n", m.lastResp.Status, m.lastResp.Duration.Round(time.Millisecond))
-	names := make([]string, 0, len(m.lastResp.Headers))
-	for name := range m.lastResp.Headers {
-		names = append(names, name)
+	if m.responseView == respViewHeaders {
+		return FormatResponseHeaders(m.lastResp)
 	}
-	sort.Strings(names)
-	for _, name := range names {
-		for _, value := range m.lastResp.Headers.Values(name) {
-			fmt.Fprintf(&b, "%s: %s\n", name, value)
-		}
-	}
-	b.WriteByte('\n')
-	body := m.lastResp.Body
-	if json.Valid(body) {
-		var formatted bytes.Buffer
-		if err := json.Indent(&formatted, body, "", "  "); err == nil {
-			body = formatted.Bytes()
-		}
-	}
-	b.Write(body)
-	if m.lastResp.Truncated {
-		b.WriteString("\n[response body truncated]")
-	}
-	return b.String()
+	return FormatResponseBody(m.lastResp.Body, m.lastResp.Truncated)
 }
 
 func (m *Model) requestContent() string {
@@ -909,6 +924,52 @@ func (m *Model) cycleFocus(delta int) {
 
 func (m *Model) cycleTab(delta int) {
 	m.resultTab = resultTab((int(m.resultTab) + delta + 3) % 3)
+	if m.resultTab == tabResponse {
+		m.responseView = respViewBody
+	}
+}
+
+func (m *Model) copyCurrentView() {
+	text := m.copyContent()
+	label := CopyTargetLabel(m.resultTab, m.responseView, m.codeFormat)
+	if text == "" {
+		m.err = "nothing to copy"
+		return
+	}
+	if m.clipboard == nil {
+		m.err = "clipboard is not available"
+		return
+	}
+	if err := m.clipboard.WriteAll(text); err != nil {
+		m.err = err.Error()
+		m.status = "copy failed"
+		return
+	}
+	m.err = ""
+	m.status = fmt.Sprintf("copied %s", label)
+}
+
+func (m *Model) copyContent() string {
+	switch m.resultTab {
+	case tabRequest:
+		return m.requestContent()
+	case tabCode:
+		content := m.codeContent()
+		if strings.HasPrefix(content, "// ") {
+			if idx := strings.Index(content, "\n\n"); idx >= 0 {
+				return content[idx+2:]
+			}
+		}
+		return content
+	default:
+		if m.lastResp == nil {
+			return ""
+		}
+		if m.responseView == respViewHeaders {
+			return FormatResponseHeaders(m.lastResp)
+		}
+		return FormatResponseBody(m.lastResp.Body, m.lastResp.Truncated)
+	}
 }
 
 func (m *Model) changeProfile(delta int) {

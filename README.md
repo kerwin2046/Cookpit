@@ -144,6 +144,8 @@ In the TUI:
 - Header values may use `{{host}}`, `{{origin}}`, and `{{scheme}}` placeholders;
   they expand when sending or exporting
 - `1/2/3` switch Response / Request / Code
+- On Response: `←/→` or `h`/`l` switch headers vs body
+- `y` copy the current result view (body, headers, request, or code)
 - `[` / `]` cycle code formats
 - `q` quit
 

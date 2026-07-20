@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -178,6 +179,30 @@ func (m *memoryHistory) LoadPreset(name string) (historypkg.Entry, error) {
 		}
 	}
 	return historypkg.Entry{}, context.Canceled
+}
+
+func TestCopyCurrentViewBody(t *testing.T) {
+	clip := &memoryClipboard{}
+	store := &memoryProfiles{profiles: map[string]vault.Profile{
+		"work": {Name: "work", Host: "example.com"},
+	}}
+	model, err := New(Options{
+		Profiles: store, Runner: fakeRunner{}, Clipboard: clip,
+		ProfileName: "work", URL: "https://example.com/",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	model.lastResp = &requestmodel.Response{Body: []byte(`{"ok":true}`)}
+	model.resultTab = tabResponse
+	model.responseView = respViewBody
+	model.copyCurrentView()
+	if clip.last == "" {
+		t.Fatal("expected clipboard content")
+	}
+	if !strings.Contains(clip.last, `"ok"`) {
+		t.Fatalf("clipboard = %q", clip.last)
+	}
 }
 
 func TestCycleHistoryAppliesEntry(t *testing.T) {
